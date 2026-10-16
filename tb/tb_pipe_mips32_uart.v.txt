@@ -1,0 +1,63 @@
+`timescale 1ns/1ps
+module tb_pipe_MIPS32_UART;
+
+    // Clock and reset
+    reg clk1, clk2, rst;
+    reg uart_rx;
+    wire uart_tx;
+
+    // Instantiate top-level SoC
+    top_soc uut (
+        .clk1(clk1),
+        .clk2(clk2),
+        .rst(rst),
+        .uart_rx(uart_rx),
+        .uart_tx(uart_tx)
+    );
+
+    // Clock generation (50 MHz)
+    initial clk1 = 0;
+    always #10 clk1 = ~clk1;
+    initial clk2 = 0;
+    always #10 clk2 = ~clk2;
+
+    // Reset
+    initial begin
+        rst = 1;
+        uart_rx = 1; // idle high
+        #50;
+        rst = 0;
+    end
+
+    // Simulation timeout
+    initial begin
+        #500000; 
+        $finish;
+    end
+
+    // UART RX idle behavior
+    always @(posedge clk1) uart_rx <= 1'b1;
+
+    // Waveform dump for GTKWave / Vivado
+    initial begin
+        $dumpfile("uart_wave.vcd");
+        $dumpvars(0, tb_pipe_MIPS32_UART);
+
+        $dumpvars(1, uut.u_cpu.PC);
+        $dumpvars(1, uut.u_cpu.IF_ID_IR);
+        $dumpvars(1, uut.u_cpu.ID_EX_IR);
+        $dumpvars(1, uut.u_cpu.ID_EX_A);
+        $dumpvars(1, uut.u_cpu.ID_EX_B);
+        $dumpvars(1, uut.u_cpu.MEM_WB_ALUout);
+        $dumpvars(1, uut.u_cpu.HALTED);
+
+        $dumpvars(1, uut.u_cpu.U_UART.tx_serial);
+        $dumpvars(1, uut.u_cpu.U_UART.tx_busy);
+        $dumpvars(1, uut.u_cpu.U_UART.rx_data);
+        $dumpvars(1, uut.u_cpu.U_UART.rx_ready);
+        $dumpvars(1, uut.u_cpu.uart_we);
+        $dumpvars(1, uut.u_cpu.uart_wdata);
+        $dumpvars(1, uut.u_cpu.uart_rdata);
+    end
+
+endmodule

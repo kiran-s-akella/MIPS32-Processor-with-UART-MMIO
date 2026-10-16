@@ -1,0 +1,284 @@
+`timescale 1ns/1ps
+
+//------------------------------------------------------------
+// UART Transmitter (8N1)
+//------------------------------------------------------------
+module uart_tx #(
+    parameter integer CLK_FREQ = 50_000_000,
+    parameter integer BAUD     = 9_600
+) (
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        tx_start,
+    input  wire [7:0]  tx_data,
+    output reg         tx_serial,
+    output reg         tx_busy
+);
+    localparam integer CLKS_PER_BIT = CLK_FREQ / BAUD;
+    reg [15:0] clk_cnt;
+    reg [3:0]  bit_idx;
+    reg [9:0]  frame;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tx_serial <= 1'b1;
+            tx_busy   <= 1'b0;
+            clk_cnt   <= 0;
+            bit_idx   <= 0;
+            frame     <= 10'h3FF;
+        end else begin
+            if (tx_start && !tx_busy) begin
+                frame   <= {1'b1, tx_data, 1'b0};
+                tx_busy <= 1'b1;
+                clk_cnt <= 0;
+                bit_idx <= 0;
+                tx_serial <= 1'b0;
+            end else if (tx_busy) begin
+                if (clk_cnt < CLKS_PER_BIT-1) begin
+                    clk_cnt <= clk_cnt + 1;
+                end else begin
+                    clk_cnt <= 0;
+                    bit_idx <= bit_idx + 1;
+                    case (bit_idx)
+                        0:  tx_serial <= frame[1];
+                        1:  tx_serial <= frame[2];
+                        2:  tx_serial <= frame[3];
+                        3:  tx_serial <= frame[4];
+                        4:  tx_serial <= frame[5];
+                        5:  tx_serial <= frame[6];
+                        6:  tx_serial <= frame[7];
+                        7:  tx_serial <= frame[8];
+                        8:  tx_serial <= frame[9];
+                        9: begin
+                            tx_busy   <= 1'b0;
+                            tx_serial <= 1'b1;
+                        end
+                        default: tx_serial <= 1'b1;
+                    endcase
+                end
+            end
+        end
+    end
+endmodule
+
+//------------------------------------------------------------
+// UART Receiver (8N1)
+//------------------------------------------------------------
+module uart_rx #(
+    parameter integer CLK_FREQ = 50_000_000,
+    parameter integer BAUD     = 9_600
+) (
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        rx_serial,
+    output reg  [7:0]  rx_data,
+    output reg         rx_ready
+);
+    localparam integer CLKS_PER_BIT = CLK_FREQ / BAUD;
+    localparam IDLE      = 2'd0;
+    localparam MIDSTART = 2'd1;
+    localparam DATA      = 2'd2;
+    localparam STOP      = 2'd3;
+
+    reg [1:0] st;
+    reg [15:0] clk_cnt;
+    reg [2:0]  bit_idx;
+    reg [7:0]  shreg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            st       <= IDLE;
+            rx_ready <= 1'b0;
+            rx_data  <= 8'h00;
+            clk_cnt  <= 0;
+            bit_idx  <= 0;
+            shreg    <= 8'h00;
+        end else begin
+            rx_ready <= 1'b0;
+            case (st)
+                IDLE: if (~rx_serial) begin st <= MIDSTART; clk_cnt <= (CLKS_PER_BIT >> 1); end
+                MIDSTART: if (clk_cnt != 0) clk_cnt <= clk_cnt - 1; else begin st <= DATA; clk_cnt <= CLKS_PER_BIT-1; bit_idx <= 0; end
+                DATA: if (clk_cnt != 0) clk_cnt <= clk_cnt - 1; else begin
+                        clk_cnt <= CLKS_PER_BIT-1;
+                        shreg[bit_idx] <= rx_serial;
+                        if (bit_idx == 3'd7) st <= STOP; else bit_idx <= bit_idx + 1;
+                      end
+                STOP: if (clk_cnt != 0) clk_cnt <= clk_cnt - 1; else begin rx_data <= shreg; rx_ready <= 1'b1; st <= IDLE; end
+                default: st <= IDLE;
+            endcase
+        end
+    end
+endmodule
+
+//------------------------------------------------------------
+// UART wrapper with simple register interface
+//------------------------------------------------------------
+module uart_mmio #(
+    parameter integer CLK_FREQ = 50_000_000,
+    parameter integer BAUD     = 9_600
+) (
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        we,
+    input  wire        re,
+    input  wire [1:0]  addr,
+    input  wire [7:0]  wdata,
+    output reg  [7:0]  rdata,
+    input  wire        rx_serial,
+    output wire        tx_serial
+);
+    reg        tx_start;
+    reg  [7:0] tx_data;
+    wire       tx_busy;
+    uart_tx #(.CLK_FREQ(CLK_FREQ), .BAUD(BAUD)) u_tx (
+        .clk(clk), .rst(rst),
+        .tx_start(tx_start), .tx_data(tx_data),
+        .tx_serial(tx_serial), .tx_busy(tx_busy)
+    );
+
+    wire [7:0] rx_data;
+    wire       rx_ready;
+    uart_rx #(.CLK_FREQ(CLK_FREQ), .BAUD(BAUD)) u_rx (
+        .clk(clk), .rst(rst), .rx_serial(rx_serial),
+        .rx_data(rx_data), .rx_ready(rx_ready)
+    );
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tx_start <= 1'b0; tx_data <= 8'h00; rdata <= 8'h00;
+        end else begin
+            tx_start <= 1'b0;
+            if (we) begin
+                if (addr == 2'b00) begin tx_data <= wdata; tx_start <= 1'b1; end
+            end
+            if (re) begin
+                case (addr)
+                    2'b00: rdata <= tx_data;
+                    2'b01: rdata <= rx_data;
+                    2'b10: rdata <= {6'b0, rx_ready, ~tx_busy};
+                    default: rdata <= 8'h00;
+                endcase
+            end
+        end
+    end
+endmodule
+
+//------------------------------------------------------------
+// Pipe MIPS32 with UART MMIO
+//------------------------------------------------------------
+module pipe_MIPS32_UART (
+    input  wire clk1,
+    input  wire clk2,
+    input  wire rst,
+    input  wire uart_rx_serial,
+    output wire uart_tx_serial
+);
+  reg [31:0] PC, IF_ID_IR, IF_ID_NPC;
+  reg [31:0] ID_EX_IR, ID_EX_NPC, ID_EX_A, ID_EX_B, ID_EX_Imm;
+  reg [2:0]  ID_EX_type, EX_MEM_type, MEM_WB_type;
+  reg [31:0] EX_MEM_IR, EX_MEM_ALUout, EX_MEM_B, EX_MEM_cond;
+  reg [31:0] MEM_WB_IR, MEM_WB_ALUout, MEM_WB_LMD;
+  reg [31:0] Reg_file[0:31];
+  reg [31:0] Mem[0:1023];  // Memory
+
+  reg HALTED;
+  reg TAKEN_BRANCH;
+
+  // UART MMIO
+  reg        uart_we, uart_re;
+  reg  [1:0] uart_addr;
+  reg  [7:0] uart_wdata;
+  wire [7:0] uart_rdata;
+
+  uart_mmio #(.CLK_FREQ(50_000_000), .BAUD(9_600)) U_UART (
+      .clk(clk1), .rst(rst),
+      .we(uart_we), .re(uart_re),
+      .addr(uart_addr), .wdata(uart_wdata),
+      .rdata(uart_rdata),
+      .rx_serial(uart_rx_serial),
+      .tx_serial(uart_tx_serial)
+  );
+
+  //------------------------------------------------------------
+  // Memory initialization task
+  //------------------------------------------------------------
+  task init_memory;
+      begin
+          // Data memory
+          Mem[100] = 32'd15; // R2
+          Mem[101] = 32'd25; // R3
+
+          // Program memory
+          Mem[0] = {6'b001000, 5'd0, 5'd2, 16'd100}; 
+          Mem[1] = {6'b001000, 5'd0, 5'd3, 16'd101}; 
+          Mem[2] = {6'b000000, 5'd2, 5'd3, 5'd1, 5'd0, 6'b000000}; // ADD
+          Mem[3] = {6'b001001, 5'd0, 5'd1, 16'd1016}; // SW to UART
+          Mem[4] = {6'b111111, 26'd0}; // HALT
+      end
+  endtask
+
+  //------------------------------------------------------------
+  // Simple IF/ID/EX/MEM/WB pipeline for demonstration
+  //------------------------------------------------------------
+  always @(posedge clk1 or posedge rst) begin
+      if (rst) begin
+          PC <= 0; HALTED <= 0;
+      end else if (!HALTED) begin
+          // Fetch
+          IF_ID_IR <= Mem[PC];
+          IF_ID_NPC <= PC + 1;
+
+          // Decode/Execute
+          ID_EX_IR <= IF_ID_IR;
+          if (IF_ID_IR[31:26] == 6'b000000) begin // ADD
+              ID_EX_A <= Reg_file[IF_ID_IR[25:21]];
+              ID_EX_B <= Reg_file[IF_ID_IR[20:16]];
+              ID_EX_Imm <= 0;
+          end else if (IF_ID_IR[31:26] == 6'b001000) begin // LW
+              ID_EX_Imm <= IF_ID_IR[15:0];
+              ID_EX_A <= Reg_file[IF_ID_IR[25:21]];
+          end else if (IF_ID_IR[31:26] == 6'b001001) begin // SW
+              ID_EX_Imm <= IF_ID_IR[15:0];
+              ID_EX_A <= Reg_file[IF_ID_IR[25:21]];
+              ID_EX_B <= Reg_file[IF_ID_IR[20:16]];
+          end else if (IF_ID_IR[31:26] == 6'b111111) begin
+              HALTED <= 1;
+          end
+
+          // Write-back for ADD
+          if (ID_EX_IR[31:26] == 6'b000000) begin
+              Reg_file[ID_EX_IR[15:11]] <= ID_EX_A + ID_EX_B;
+          end else if (ID_EX_IR[31:26] == 6'b001001) begin // SW
+              if (ID_EX_Imm == 1016) begin
+                  uart_wdata <= Reg_file[ID_EX_IR[20:16]][7:0];
+                  uart_we <= 1;
+                  uart_addr <= 2'b00;
+              end
+          end
+
+          PC <= PC + 1;
+      end else begin
+          uart_we <= 0;
+      end
+  end
+
+endmodule
+
+//------------------------------------------------------------
+// Top-level SoC
+//------------------------------------------------------------
+module top_soc (
+    input  wire clk1,
+    input  wire clk2,
+    input  wire rst,
+    input  wire uart_rx,
+    output wire uart_tx
+);
+    pipe_MIPS32_UART u_cpu (
+        .clk1(clk1),
+        .clk2(clk2),
+        .rst(rst),
+        .uart_rx_serial(uart_rx),
+        .uart_tx_serial(uart_tx)
+    );
+endmodule
